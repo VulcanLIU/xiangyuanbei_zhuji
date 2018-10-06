@@ -1,0 +1,228 @@
+/*
+ * GccApplication69.cpp
+ *
+ * Created: 2017/11/19 20:40:59
+ * Author : Vulcan
+ */ 
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+//#include <stdlib.h>
+//#include <math.h>
+#define  RX_begin_byte 0xFf
+#define data_Index_MAX 1000
+
+void USART0_init();//用来接蓝牙
+uint8_t RX_group[6];
+bool RX_flag;//是否接收到手柄发过来的数组
+int8_t RX_Index=0;
+bool RX_COMP_flag=0;
+
+void USART1_init();//用来接串口显示器
+void USART0_send(int);//给遥控器发送确认型号 0x55
+void USART1_send(int);//给串口显示器发送数据
+void TC0_init();//电机驱动定时器
+void TC1_init();//红外管阵列采样定时器
+int correct_data_index(int);
+int8_t x1,x2,X_count,X_count1;
+int8_t X=0;
+int8_t data[data_Index_MAX][3]={{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0}};//数据记录数组 {时间高位，时间低位，位置}
+uint8_t v[1000];//记录时间 为了节约程序储存器空间我把分开放置
+uint8_t kp,ki;
+uint8_t OCR0A_base = 128,OCR0B_base = 128;
+uint8_t _OCR0A=0,_OCR0B=0;
+int data_Index=7,time_Index=0;
+int v_temp=0;
+
+// void TC2_init();//电机速度计算定时器
+// void INT0_init();//电机一脉冲中断
+// void INT1_init();//电机二的脉冲中断
+int8_t v1=0,v2=0;
+
+int main(void)
+{
+	SREG|=0x80;
+	USART1_init();
+
+// DDRK|=0xff;
+// DDRC|=0xff;
+	USART0_init();
+	USART1_send(0x00);
+	TC0_init ();
+	TC1_init ();
+	USART1_send(0x01);
+// 		/*接光电对管*/
+	PORTA |=0XFF;
+	PORTC |=0XFF;
+// 		
+    /* Replace with your application code */
+    while (1) 
+    {
+		if (RX_COMP_flag==1)
+		{
+			//把从遥控端发来的数据搬运到内部的储存器中
+			kp = (RX_group[0]<<7)|(RX_group[1]);
+			ki = (RX_group[2]<<7)|(RX_group[3]);
+			OCR0A_base=RX_group[4];
+			OCR0B_base=RX_group[5];
+			RX_COMP_flag=0;
+		}
+		//把这个数据发送给串口显示器 kp ki x
+		USART1_send(RX_begin_byte);
+		USART1_send(RX_group[0]); //byte0
+		USART1_send(RX_group[1]);//byte1
+		USART1_send(RX_group[2]);//byte2
+		USART1_send(RX_group[3]);//byte3
+		USART1_send(OCR0A_base);//byte4
+		USART1_send(OCR0B_base);//byte5
+		//USART1_send(x1);
+		USART1_send(data[correct_data_index(data_Index-1)][2]);//byte6
+		//USART1_send(x2);//byte7
+		USART1_send(v[correct_data_index(data_Index-1)]);//byte7
+		USART1_send(_OCR0A);//byte8
+		//USART1_send(X_count1);//byte8
+		USART1_send(_OCR0B);//byte9
+		
+		//给遥控器发送一个确认信号
+		USART0_send(data[correct_data_index(data_Index-1)][2]);
+			
+		OCR0A=_OCR0A;
+		OCR0B=_OCR0B;
+    }
+}
+
+void USART0_init()
+{
+	UCSR0B |=(1<<RXEN0)|(1<<TXEN0)|(1<<RXCIE0);
+	UCSR0C |=(1<<UCSZ01)|(1<<UCSZ00);
+	UBRR0L =103;
+}
+
+void USART1_init()
+{
+	UCSR1B |=(1<<RXEN1)|(1<<TXEN1);
+	UCSR1C |=(1<<UCSZ11)|(1<<UCSZ10);
+	UBRR1L =103;
+}
+void USART0_send(int data)
+{
+	while ( !( UCSR0A & (1<<UDRE0)) );
+	UDR0 = data;
+}
+
+void USART1_send(int data)
+{
+	while ( !( UCSR1A & (1<<UDRE1)));
+	UDR1 = data;
+}
+
+void TC0_init ()
+{
+	TCCR0A |=(1<<WGM01)|(1<<WGM00)|(1<<COM0A1);
+	TCCR0B |=(1<<CS02)|(1<<CS00);
+	OCR0A=OCR0A_base;
+
+	TCCR0A |=(1<<COM0B1);
+	OCR0B=OCR0B_base;
+	
+	DDRB |=(1<<DDB7);
+	PORTB|=(1<<PORTB7);
+	DDRG |=(1<<DDG5);
+	PORTG|=(1<<DDG5);
+}
+
+/*采样定时器 一共5s*/
+void TC1_init ()
+{
+	TCCR1B |= (1<<WGM12);//定义为CTC模式
+	TCCR1B |=(1<<CS11);//8分频 CPU频率16Mhz 单次时间0.5ns
+	OCR1A=10000; //计数TOP值 0.5ms 采样一次 1000的数组就是一共5ms
+	TIMSK1 |=(1<<OCIE1A);//输出比较A匹配中断使能
+}
+/*只用来给出data_index的应该指代的数字,不改变data_index的大小*/
+int correct_data_index(int n)
+{
+	if (n>=data_Index_MAX)
+	{
+		n = n-data_Index_MAX;
+	}
+	else if (n<0)
+	{
+		n +=data_Index_MAX;
+	}
+	return n;
+}
+
+//采样中断服务
+ISR (TIMER1_COMPA_vect)
+{
+	SREG &=~(0x80);
+	/*数组格式 
+	——数组data  {记录时间（高8位），记录时间（低8位），黑线位置}
+	左右摇摆速度有单独的数组记录 
+	——数组V 浮点型
+	*/
+	
+	/*采样*/
+	x1 = PINA;
+	x2 = PINC;
+	
+	//黑线位置——分析光电对管的数据 得出x在哪 有几个被激发了
+	for (int i=0;i<8;i++)
+	{
+		if ((x1&(1<<i))==(1<<i)){X=i;X_count++;}
+		if ((x2&(1<<i))==(1<<i)){X=-i-1;X_count++;}
+	}
+	
+	//记录时间
+	data[data_Index][0] = (time_Index<<8);
+	data[data_Index][1] = (time_Index);
+	
+	/*数据处理*/
+	//错误检测——如果两个以下的光电对管检测到黑线*/
+	if ((X_count>0)&&(X_count<=2))
+	{
+		//记录位置
+		data[data_Index][2]=X;
+		//计算速度——0.1s内的平均速度 单次0.5ms
+		for (int m=0;m<2;m++)
+		{
+			v_temp += data[correct_data_index(data_Index-m)][2]-data[correct_data_index(data_Index-10-m)][2];
+		}
+		v[data_Index]=v_temp;
+	}
+	else //否则就忽略这组数据，让这次的数据维持上一组数据的值
+	{
+		data[data_Index][2]=data[correct_data_index(data_Index-1)][2];
+		v[data_Index]=v[correct_data_index(data_Index-1)];
+	}
+	v_temp=0;
+	X_count1=X_count;
+	X_count=0;//计数器——受触发的光电对管 清零
+	
+	//PID部分
+	_OCR0A = OCR0A_base+0.1*kp*(data[data_Index][2])-ki*(v[data_Index]);
+	_OCR0B = OCR0B_base-0.1*kp*(data[data_Index][2])+ki*(v[data_Index]);
+
+	data_Index++;
+	data_Index=correct_data_index(data_Index);
+	SREG |=0x80;
+}
+ISR (USART0_RX_vect)
+{
+	int UDR_TEMP = UDR0;
+	if ((RX_flag == 1)&&(RX_Index>=0))
+	{
+		RX_group[RX_Index]=UDR_TEMP;
+		RX_Index++;
+	}
+	if(RX_Index>=6)
+	{
+		RX_Index = 0;//数组指针置零
+		RX_flag = 0;//起始帧标志位清零
+		RX_COMP_flag=1;//4个8bit接收完成
+	}
+	if (UDR_TEMP==RX_begin_byte){RX_flag = 1;}//接收到起始帧
+}
+
